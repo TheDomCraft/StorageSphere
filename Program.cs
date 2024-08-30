@@ -13,7 +13,6 @@
 
 using System;
 using System.IO;
-using System.IO.Compression;
 
 class StorSphere
 {
@@ -25,13 +24,13 @@ class StorSphere
             args[0] != "list" && 
             args[0] != "info"))
         {
-            Console.WriteLine("=====================================================================");
+            Console.WriteLine("============================================================================");
             Console.WriteLine("StorSphere Archive | Copyright (C) 2020 - 2024 CraftMusic App Studios");
-            Console.WriteLine("=====================================================================");
-            Console.WriteLine("Usage: storsphere pack <output.ssph> <file1> <file2> ...");
+            Console.WriteLine("============================================================================");
+            Console.WriteLine("Usage: storsphere pack <output.ssph> <file_or_folder1> <file_or_folder2> ...");
             Console.WriteLine("Usage: storsphere unpack <input.ssph> <output_folder>");
             Console.WriteLine("Usage: storsphere list <input.ssph>");
-            Console.WriteLine("=====================================================================");
+            Console.WriteLine("============================================================================");
             return;
         }
 
@@ -40,9 +39,9 @@ class StorSphere
 
         if (command == "pack")
         {
-            string[] filesToPack = new string[args.Length - 2];
-            Array.Copy(args, 2, filesToPack, 0, args.Length - 2);
-            Pack(archiveName, filesToPack);
+            string[] itemsToPack = new string[args.Length - 2];
+            Array.Copy(args, 2, itemsToPack, 0, args.Length - 2);
+            Pack(archiveName, itemsToPack);
         }
         else if (command == "unpack")
         {
@@ -58,50 +57,78 @@ class StorSphere
             Console.WriteLine("=====================================================================");
             Console.WriteLine("StorSphere Archive | Copyright (C) 2020 - 2024 CraftMusic App Studios");
             Console.WriteLine("=====================================================================");
-            Console.WriteLine("StorSphere Version: 1.1.0.0");
-            Console.WriteLine("StorSphere Build: 300820240448");
+            Console.WriteLine("StorSphere Version: 1.2.0.0");
+            Console.WriteLine("StorSphere Build: 300820240550");
             Console.WriteLine("=====================================================================");
         }
     }
 
-    static void Pack(string archiveName, string[] filesToPack)
+    static void Pack(string archiveName, string[] itemsToPack)
     {
         using (FileStream fsOut = File.Create(archiveName))
         {
-            using (GZipStream gzStream = new GZipStream(fsOut, CompressionMode.Compress))
+            using (BinaryWriter writer = new BinaryWriter(fsOut))
             {
-                using (BinaryWriter writer = new BinaryWriter(gzStream))
+                foreach (string item in itemsToPack)
                 {
-                    foreach (string file in filesToPack)
+                    if (Directory.Exists(item))
                     {
-                        byte[] fileBytes = File.ReadAllBytes(file);
-                        writer.Write(fileBytes.Length);
-                        writer.Write(Path.GetFileName(file));
-                        writer.Write(fileBytes);
+                        PackDirectory(writer, item, item);
+                    }
+                    else if (File.Exists(item))
+                    {
+                        PackFile(writer, item, Path.GetFileName(item));
                     }
                 }
             }
         }
-        Console.WriteLine($"[StorSphere] Packed files into {archiveName}");
+        Console.WriteLine($"[StorSphere] Packed items into {archiveName}");
+    }
+
+    static void PackDirectory(BinaryWriter writer, string rootPath, string currentPath)
+    {
+        foreach (string directory in Directory.GetDirectories(currentPath))
+        {
+            PackDirectory(writer, rootPath, directory);
+        }
+
+        foreach (string file in Directory.GetFiles(currentPath))
+        {
+            string relativePath = Path.GetRelativePath(rootPath, file);
+            PackFile(writer, file, relativePath);
+        }
+    }
+
+    static void PackFile(BinaryWriter writer, string filePath, string entryName)
+    {
+        byte[] fileBytes = File.ReadAllBytes(filePath);
+        writer.Write(fileBytes.Length);
+        writer.Write(entryName);
+        writer.Write(fileBytes);
     }
 
     static void Unpack(string archiveName, string outputFolder)
     {
         using (FileStream fsIn = File.OpenRead(archiveName))
         {
-            using (GZipStream gzStream = new GZipStream(fsIn, CompressionMode.Decompress))
+            using (BinaryReader reader = new BinaryReader(fsIn))
             {
-                using (BinaryReader reader = new BinaryReader(gzStream))
+                try
                 {
-                    while (reader.BaseStream.Position != reader.BaseStream.Length)
+                    while (true)
                     {
                         int fileSize = reader.ReadInt32();
                         string fileName = reader.ReadString();
                         byte[] fileData = reader.ReadBytes(fileSize);
 
                         string filePath = Path.Combine(outputFolder, fileName);
+                        Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? string.Empty);
                         File.WriteAllBytes(filePath, fileData);
                     }
+                }
+                catch (EndOfStreamException)
+                {
+                    // Reached the end of the archive
                 }
             }
         }
@@ -112,17 +139,23 @@ class StorSphere
     {
         using (FileStream fsIn = File.OpenRead(archiveName))
         {
-            using (GZipStream gzStream = new GZipStream(fsIn, CompressionMode.Decompress))
+            using (BinaryReader reader = new BinaryReader(fsIn))
             {
-                using (BinaryReader reader = new BinaryReader(gzStream))
+                try
                 {
-                    while (reader.BaseStream.Position != reader.BaseStream.Length)
+                    while (true)
                     {
                         int fileSize = reader.ReadInt32();
                         string fileName = reader.ReadString();
                         Console.WriteLine($"{fileName} - {fileSize} bytes");
-                        reader.BaseStream.Seek(fileSize, SeekOrigin.Current); // Skip the file content
+
+                        // Manually read and discard the file content to skip it
+                        reader.ReadBytes(fileSize);
                     }
+                }
+                catch (EndOfStreamException)
+                {
+                    // Reached the end of the archive
                 }
             }
         }
