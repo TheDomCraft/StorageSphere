@@ -19,7 +19,11 @@ class StorSphere
 {
     static void Main(string[] args)
     {
-        if (args.Length < 3 || (args[0] != "pack" && args[0] != "unpack" && args[0] != "list"))
+        if (args.Length < 2 || (
+            args[0] != "pack" && 
+            args[0] != "unpack" && 
+            args[0] != "list" && 
+            args[0] != "info"))
         {
             Console.WriteLine("=====================================================================");
             Console.WriteLine("StorSphere Archive | Copyright (C) 2020 - 2024 CraftMusic App Studios");
@@ -48,6 +52,15 @@ class StorSphere
         else if (command == "list")
         {
             ListContents(archiveName);
+        }
+        else if (command == "info")
+        {
+            Console.WriteLine("=====================================================================");
+            Console.WriteLine("StorSphere Archive | Copyright (C) 2020 - 2024 CraftMusic App Studios");
+            Console.WriteLine("=====================================================================");
+            Console.WriteLine("StorSphere Version: 1.1.0.0");
+            Console.WriteLine("StorSphere Build: 300820240448");
+            Console.WriteLine("=====================================================================");
         }
     }
 
