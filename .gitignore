@@ -362,5 +362,8 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 
-# Files related to test the program functionality
+# Files related to test the project functionality
 tests/
+
+# Compiled builds of our project
+build/
