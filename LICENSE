@@ -1,11 +1,21 @@
-Project StorSphere - LICENSE
-============================
+MIT License
 
-These coded instructions, statements, and computer programs contain proprietary information of the CraftMusic App Studios,
-and are protected by Federal copyright law. They may not be disclosed to third parties or copied or duplicated in any form,
-in whole or in part, without the prior written consent of the CraftMusic App Studios.
+Copyright (c) 2025 TheDomCraft
 
-Project StorSphere as well as its files and documentation are subject to secrecy of CraftMusic App Studios.
-The terms of the CraftMusic App Studios non-disclosure agreement apply.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Copyright (C) 2020-2024 CraftMusic App Studios. All rights reserved.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
