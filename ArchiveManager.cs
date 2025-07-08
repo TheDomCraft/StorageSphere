@@ -63,11 +63,11 @@ namespace StorageSphere
                 {
                     rng.GetBytes(salt);
                     rng.GetBytes(iv);
-                    key = new byte[CryptoHelper.KeySize];
-                    rng.GetBytes(key);
-                    hmacKey = new byte[CryptoHelper.KeySize];
-                    rng.GetBytes(hmacKey);
                 }
+                key = new byte[CryptoHelper.KeySize]; // unused
+                hmacKey = new byte[CryptoHelper.KeySize]; // will use fixed all-zero key
+                // set HMAC key to all zeroes for unencrypted
+                Array.Clear(hmacKey, 0, hmacKey.Length);
             }
 
             using (var fs = File.Create(archive))
@@ -215,44 +215,45 @@ namespace StorageSphere
                 byte[] salt = reader.ReadBytes(CryptoHelper.SaltSize);
                 byte[] iv = reader.ReadBytes(CryptoHelper.IvSize);
 
-                if (!_quiet && encrypted && !string.IsNullOrWhiteSpace(hint))
-                    Console.WriteLine($"Password hint: {hint}");
-
                 byte[] key = null;
                 byte[] hmacKey = null;
                 if (encrypted)
                 {
+                    if (!_quiet && !string.IsNullOrWhiteSpace(hint))
+                        Console.WriteLine($"Password hint: {hint}");
                     string password = CryptoHelper.PromptPassword("Enter password to decrypt archive: ");
                     key = CryptoHelper.DeriveKey(password, salt);
                     hmacKey = CryptoHelper.DeriveKey(password + "HMAC", salt);
                 }
                 else
                 {
-                    key = new byte[CryptoHelper.KeySize];
+                    key = new byte[CryptoHelper.KeySize]; // unused
                     hmacKey = new byte[CryptoHelper.KeySize];
-                    fs.Read(key, 0, key.Length);
-                    fs.Read(hmacKey, 0, hmacKey.Length);
+                    // always use all-zero HMAC key for unencrypted, this is temporary since idk how to fix it rn...
+                    Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
                 long bodyStart = fs.Position;
                 long hmacPos = fs.Length - CryptoHelper.HmacSize;
                 long dataLen = hmacPos - bodyStart;
 
-                // Verify HMAC
+                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
-                var ms = new MemoryStream();
-                fs.CopyTo(ms, (int)dataLen);
-                byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, ms);
+                byte[] dataSection = new byte[dataLen];
+                fs.Read(dataSection, 0, (int)dataLen);
+
+                // Verify HMAC on the raw dataSection
+                byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
                 fs.Position = hmacPos;
                 byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
-                if (!CryptoHelper.VerifyHmac(hmacKey, ms, fileHmac))
+                if (!CryptoHelper.VerifyHmac(hmacKey, new MemoryStream(dataSection), fileHmac))
                 {
                     Console.WriteLine("[StorageSphere] ERROR: Archive integrity check failed (HMAC mismatch)!");
                     return;
                 }
 
                 // Decrypt if needed
-                Stream dataStream = new MemoryStream(ms.GetBuffer(), 0, (int)ms.Length);
+                Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
                     var aes = Aes.Create();
@@ -263,68 +264,87 @@ namespace StorageSphere
                     dataStream = new CryptoStream(dataStream, aes.CreateDecryptor(), CryptoStreamMode.Read);
                 }
 
-                using (var dataReader = new BinaryReader(dataStream, Encoding.UTF8, leaveOpen: false))
+                // --- PROCESS ENTRIES ---
+                int totalCount = 0;
+                if (_verbose && !_quiet)
                 {
-                    var entries = new List<(EntryType type, string rel, FileMetadata meta, long origLen, int compLen, long dataPos)>();
-                    while (dataStream.Position < dataStream.Length)
+                    // Count entries for progress bar (only if unencrypted, as we can scan MemoryStream)
+                    if (dataStream is MemoryStream ms)
                     {
-                        EntryType type = (EntryType)dataReader.ReadByte();
+                        long oldPos = ms.Position;
+                        var tempReader = new BinaryReader(ms, Encoding.UTF8, leaveOpen: true);
+                        while (true)
+                        {
+                            try
+                            {
+                                EntryType type = (EntryType)tempReader.ReadByte();
+                                tempReader.ReadString(); // rel
+                                FileMetadata.Read(tempReader);
+                                if (type == EntryType.File)
+                                {
+                                    tempReader.ReadInt64();
+                                    int compLen = tempReader.ReadInt32();
+                                    tempReader.BaseStream.Position += compLen;
+                                }
+                                totalCount++;
+                            }
+                            catch
+                            {
+                                break;
+                            }
+                        }
+                        ms.Position = oldPos;
+                    }
+                }
+
+                using (var dataReader = new BinaryReader(dataStream, Encoding.UTF8, leaveOpen: false))
+                using (var pb = _verbose && !_quiet ? new ProgressBar(totalCount > 0 ? totalCount : 1) : null)
+                {
+                    int idx = 0;
+                    while (true)
+                    {
+                        EntryType type;
+                        try { type = (EntryType)dataReader.ReadByte(); }
+                        catch (EndOfStreamException) { break; }
+                        catch (IOException) { break; }
                         string rel = dataReader.ReadString();
                         var meta = FileMetadata.Read(dataReader);
-                        long origLen = 0;
-                        int compLen = 0;
-                        long dataPos = dataStream.Position;
-
-                        if (type == EntryType.File)
+                        string outPath = Path.Combine(outdir, rel);
+                        if (type == EntryType.Directory)
                         {
-                            origLen = dataReader.ReadInt64();
-                            compLen = dataReader.ReadInt32();
-                            dataStream.Position += compLen;
+                            Directory.CreateDirectory(outPath);
+                            SetMetadata(outPath, meta);
                         }
-                        entries.Add((type, rel, meta, origLen, compLen, dataPos));
-                    }
-
-                    using (var pb = _verbose && !_quiet ? new ProgressBar(entries.Count) : null)
-                    {
-                        int idx = 0;
-                        foreach (var entry in entries)
+                        else if (type == EntryType.File)
                         {
-                            idx++;
-                            string outPath = Path.Combine(outdir, entry.rel);
-                            if (entry.type == EntryType.Directory)
+                            long origLen = dataReader.ReadInt64();
+                            int compLen = dataReader.ReadInt32();
+                            byte[] compData = dataReader.ReadBytes(compLen);
+                            Directory.CreateDirectory(Path.GetDirectoryName(outPath));
+                            using (var compStream = new MemoryStream(compData))
+                            using (var fsOut = File.Create(outPath))
                             {
-                                Directory.CreateDirectory(outPath);
-                                SetMetadata(outPath, entry.meta);
-                            }
-                            else if (entry.type == EntryType.File)
-                            {
-                                Directory.CreateDirectory(Path.GetDirectoryName(outPath));
-                                dataStream.Position = entry.dataPos;
-                                byte[] compData = dataReader.ReadBytes(entry.compLen);
-                                using (var compStream = new MemoryStream(compData))
-                                using (var fsOut = File.Create(outPath))
+                                Stream decStream = compStream;
+                                switch (compType)
                                 {
-                                    Stream decStream = compStream;
-                                    switch (compType)
-                                    {
-                                        case CompressionType.Deflate:
-                                            decStream = new DeflateStream(compStream, CompressionMode.Decompress);
-                                            break;
-                                        case CompressionType.GZip:
-                                            decStream = new GZipStream(compStream, CompressionMode.Decompress);
-                                            break;
-                                        case CompressionType.Brotli:
-                                            decStream = new BrotliStream(compStream, CompressionMode.Decompress);
-                                            break;
-                                        case CompressionType.None:
-                                            break;
-                                    }
-                                    decStream.CopyTo(fsOut);
+                                    case CompressionType.Deflate:
+                                        decStream = new DeflateStream(compStream, CompressionMode.Decompress);
+                                        break;
+                                    case CompressionType.GZip:
+                                        decStream = new GZipStream(compStream, CompressionMode.Decompress);
+                                        break;
+                                    case CompressionType.Brotli:
+                                        decStream = new BrotliStream(compStream, CompressionMode.Decompress);
+                                        break;
+                                    case CompressionType.None:
+                                        break;
                                 }
-                                SetMetadata(outPath, entry.meta);
+                                decStream.CopyTo(fsOut);
                             }
-                            pb?.Report(idx);
+                            SetMetadata(outPath, meta);
                         }
+                        idx++;
+                        pb?.Report(idx);
                     }
                 }
             }
@@ -355,24 +375,39 @@ namespace StorageSphere
                 long dataLen = hmacPos - bodyStart;
 
                 byte[] key = null;
+                byte[] hmacKey = null;
                 if (encrypted)
                 {
                     if (!_quiet && !string.IsNullOrWhiteSpace(hint))
                         Console.WriteLine($"Password hint: {hint}");
                     string password = CryptoHelper.PromptPassword("Enter password to decrypt archive: ");
                     key = CryptoHelper.DeriveKey(password, salt);
+                    hmacKey = CryptoHelper.DeriveKey(password + "HMAC", salt);
                 }
                 else
                 {
                     key = new byte[CryptoHelper.KeySize];
-                    fs.Read(key, 0, key.Length);
+                    hmacKey = new byte[CryptoHelper.KeySize];
+                    Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
-                // Read only encrypted data section
+                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
-                byte[] encryptedData = new byte[dataLen];
-                fs.Read(encryptedData, 0, (int)dataLen);
-                Stream dataStream = new MemoryStream(encryptedData);
+                byte[] dataSection = new byte[dataLen];
+                fs.Read(dataSection, 0, (int)dataLen);
+
+                // Verify HMAC on the raw dataSection
+                byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
+                fs.Position = hmacPos;
+                byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
+                if (!CryptoHelper.VerifyHmac(hmacKey, new MemoryStream(dataSection), fileHmac))
+                {
+                    Console.WriteLine("[StorageSphere] ERROR: Archive integrity check failed (HMAC mismatch)!");
+                    return;
+                }
+
+                // Decrypt if needed
+                Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
                     var aes = Aes.Create();
@@ -390,6 +425,7 @@ namespace StorageSphere
                         EntryType type;
                         try { type = (EntryType)dataReader.ReadByte(); }
                         catch (EndOfStreamException) { break; }
+                        catch (IOException) { break; }
                         string rel = dataReader.ReadString();
                         var meta = FileMetadata.Read(dataReader);
                         if (type == EntryType.File)
@@ -437,6 +473,10 @@ namespace StorageSphere
                                     remain -= n;
                                 }
                             }
+                        }
+                        else if (type == EntryType.Directory)
+                        {
+                            // skip
                         }
                     }
                 }
@@ -504,24 +544,39 @@ namespace StorageSphere
                 long dataLen = hmacPos - bodyStart;
 
                 byte[] key = null;
+                byte[] hmacKey = null;
                 if (encrypted)
                 {
                     if (!_quiet && !string.IsNullOrWhiteSpace(hint))
                         Console.WriteLine($"Password hint: {hint}");
                     string password = CryptoHelper.PromptPassword("Enter password to list archive: ");
                     key = CryptoHelper.DeriveKey(password, salt);
+                    hmacKey = CryptoHelper.DeriveKey(password + "HMAC", salt);
                 }
                 else
                 {
                     key = new byte[CryptoHelper.KeySize];
-                    fs.Read(key, 0, key.Length);
+                    hmacKey = new byte[CryptoHelper.KeySize];
+                    Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
-                // Read only encrypted data section
+                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
-                byte[] encryptedData = new byte[dataLen];
-                fs.Read(encryptedData, 0, (int)dataLen);
-                Stream dataStream = new MemoryStream(encryptedData);
+                byte[] dataSection = new byte[dataLen];
+                fs.Read(dataSection, 0, (int)dataLen);
+
+                // Verify HMAC on the raw dataSection
+                byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
+                fs.Position = hmacPos;
+                byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
+                if (!CryptoHelper.VerifyHmac(hmacKey, new MemoryStream(dataSection), fileHmac))
+                {
+                    Console.WriteLine("[StorageSphere] ERROR: Archive integrity check failed (HMAC mismatch)!");
+                    return;
+                }
+
+                // Decrypt if needed
+                Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
                     var aes = Aes.Create();
@@ -588,21 +643,37 @@ namespace StorageSphere
                 int fileCount = 0, dirCount = 0;
                 long origTotal = 0, compTotal = 0;
                 byte[] key = null;
+                byte[] hmacKey = null;
                 if (encrypted)
                 {
                     string password = CryptoHelper.PromptPassword("Enter password to show info: ");
                     key = CryptoHelper.DeriveKey(password, salt);
+                    hmacKey = CryptoHelper.DeriveKey(password + "HMAC", salt);
                 }
                 else
                 {
                     key = new byte[CryptoHelper.KeySize];
-                    fs.Read(key, 0, key.Length);
+                    hmacKey = new byte[CryptoHelper.KeySize];
+                    Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
+                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
-                byte[] encryptedData = new byte[dataLen];
-                fs.Read(encryptedData, 0, (int)dataLen);
-                Stream dataStream = new MemoryStream(encryptedData);
+                byte[] dataSection = new byte[dataLen];
+                fs.Read(dataSection, 0, (int)dataLen);
+
+                // Verify HMAC on the raw dataSection
+                byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
+                fs.Position = hmacPos;
+                byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
+                if (!CryptoHelper.VerifyHmac(hmacKey, new MemoryStream(dataSection), fileHmac))
+                {
+                    Console.WriteLine("[StorageSphere] ERROR: Archive integrity check failed (HMAC mismatch)!");
+                    return;
+                }
+
+                // Decrypt if needed
+                Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
                     var aes = Aes.Create();
