@@ -427,7 +427,15 @@ namespace StorageSphere
                             else
                             {
                                 // skip
-                                dataReader.BaseStream.Seek(compLen, SeekOrigin.Current);
+                                byte[] discard = new byte[8192];
+                                int remain = compLen;
+                                while (remain > 0)
+                                {
+                                    int toRead = Math.Min(discard.Length, remain);
+                                    int n = dataReader.BaseStream.Read(discard, 0, toRead);
+                                    if (n <= 0) break;
+                                    remain -= n;
+                                }
                             }
                         }
                     }
@@ -622,7 +630,17 @@ namespace StorageSphere
                             int compLen = dataReader.ReadInt32();
                             origTotal += origLen;
                             compTotal += compLen;
-                            dataReader.BaseStream.Seek(compLen, SeekOrigin.Current);
+
+                            // Use non-seekable skip
+                            byte[] discardBuf = new byte[8192];
+                            int bytesToSkip = compLen;
+                            while (bytesToSkip > 0)
+                            {
+                                int chunkSize = Math.Min(discardBuf.Length, bytesToSkip);
+                                int n = dataReader.BaseStream.Read(discardBuf, 0, chunkSize);
+                                if (n <= 0) break;
+                                bytesToSkip -= n;
+                            }
                         }
                         else if (type == EntryType.Directory)
                         {
@@ -648,7 +666,7 @@ namespace StorageSphere
         // CHANGE PASSWORD
         public void ChangePassword(string archive)
         {
-            string tempDir = Path.Combine(Path.GetTempPath(), "storsphere_passwd_" + Guid.NewGuid().ToString("N"));
+            string tempDir = Path.Combine(Path.GetTempPath(), "storagesphere_passwd_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(tempDir);
 
             try
