@@ -436,6 +436,46 @@ namespace StorageSphere
             Console.WriteLine($"[StorageSphere] Entry '{entry}' not found in archive.");
         }
 
+        // ADD SINGLE FILE
+        public void AddFiles(string archive, string[] files)
+        {
+            string tempDir = Path.Combine(Path.GetTempPath(), "storagesphere_add_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(tempDir);
+
+            try
+            {
+                Unpack(archive, tempDir);
+
+                foreach (string f in files)
+                {
+                    string abs = Path.GetFullPath(f);
+                    string dest = Path.Combine(tempDir, Path.GetFileName(f));
+                    if (Directory.Exists(abs))
+                    {
+                        CopyDirectory(abs, dest);
+                    }
+                    else if (File.Exists(abs))
+                    {
+                        File.Copy(abs, dest, true);
+                    }
+                }
+
+                // Repack
+                string archiveBak = archive + ".bak";
+                File.Move(archive, archiveBak);
+                string[] allFiles = Directory.GetFileSystemEntries(tempDir, "*", SearchOption.AllDirectories);
+                Pack(archive, allFiles, false, null, "deflate");
+                File.Delete(archiveBak);
+
+                if (!_quiet)
+                    Console.WriteLine($"[StorageSphere] Added files to archive.");
+            }
+            finally
+            {
+                Directory.Delete(tempDir, true);
+            }
+        }
+
         // LIST CONTENTS: FIXED to only decrypt the correct section
         public void ListContents(string archive)
         {
@@ -690,46 +730,6 @@ namespace StorageSphere
             catch { }
         }
 
-        public void AddFiles(string archive, string[] files)
-        {
-            string tempDir = Path.Combine(Path.GetTempPath(), "storsphere_add_" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(tempDir);
-
-            try
-            {
-                Unpack(archive, tempDir);
-
-                foreach (string f in files)
-                {
-                    string abs = Path.GetFullPath(f);
-                    string dest = Path.Combine(tempDir, Path.GetFileName(f));
-                    if (Directory.Exists(abs))
-                    {
-                        CopyDirectory(abs, dest);
-                    }
-                    else if (File.Exists(abs))
-                    {
-                        File.Copy(abs, dest, true);
-                    }
-                }
-
-                // Repack
-                string archiveBak = archive + ".bak";
-                File.Move(archive, archiveBak);
-                string[] allFiles = Directory.GetFileSystemEntries(tempDir, "*", SearchOption.AllDirectories);
-                Pack(archive, allFiles, false, null, "deflate");
-                File.Delete(archiveBak);
-
-                if (!_quiet)
-                    Console.WriteLine($"[StorSphere] Added files to archive.");
-            }
-            finally
-            {
-                Directory.Delete(tempDir, true);
-            }
-        }
-
-        // Helper (place in the class if not present):
         private void CopyDirectory(string src, string dest)
         {
             Directory.CreateDirectory(dest);
