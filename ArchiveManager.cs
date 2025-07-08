@@ -615,7 +615,7 @@ namespace StorageSphere
                                 bytesToRead -= read;
                             }
                         }
-                        Console.WriteLine($"{typeStr} {rel} perms={perms}");
+                        Console.WriteLine($"{typeStr} {rel} | perms: {perms}");
                     }
                 }
             }

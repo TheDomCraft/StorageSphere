@@ -36,7 +36,7 @@ namespace StorageSphere
             }
         }
 
-        // Symlink support removed
+        // We dont support Symlinks at this time, so this is basicly useless right now...
         public static bool IsSymlink(FileSystemInfo fi) => false;
         public static string ReadSymlink(string path) => "";
         public static void CreateSymlink(string target, string link) { }

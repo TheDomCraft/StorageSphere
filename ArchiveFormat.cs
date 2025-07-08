@@ -7,7 +7,6 @@ namespace StorageSphere
     {
         File = 1,
         Directory = 2
-        // Symlink removed
     }
 
     public enum CompressionType : byte
@@ -25,7 +24,6 @@ namespace StorageSphere
         public long LastAccessTimeUtc;
         public int Attributes;
         public string UnixPerms;
-        // Removed IsSymlink, SymlinkTarget
         public string Owner;
         public string Group;
 
@@ -37,7 +35,6 @@ namespace StorageSphere
             meta.LastAccessTimeUtc = r.ReadInt64();
             meta.Attributes = r.ReadInt32();
             meta.UnixPerms = r.ReadString();
-            // Symlink fields removed
             meta.Owner = r.ReadString();
             meta.Group = r.ReadString();
             return meta;
@@ -50,7 +47,6 @@ namespace StorageSphere
             w.Write(LastAccessTimeUtc);
             w.Write(Attributes);
             w.Write(UnixPerms ?? "");
-            // Symlink fields removed
             w.Write(Owner ?? "");
             w.Write(Group ?? "");
         }
