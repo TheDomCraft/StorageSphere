@@ -5,7 +5,7 @@
 
 ---
 
-## ✨ Features
+## Features
 
 - **Cross-platform:** Works on Windows, Linux, and macOS (.NET 6+ required; full metadata support on Unix-like systems with [Mono.Posix.NETStandard](https://www.nuget.org/packages/Mono.Posix.NETStandard)).
 - **Optional AES-256 Encryption:** Secure your archives with a password and optional password hint.
@@ -24,7 +24,7 @@
 
 ---
 
-## 🚧 Limitations / Status
+## Limitations / Status
 
 - **Proof of Concept:** Not intended for production or long-term archival.
 - **No GUI:** CLI only.
@@ -35,7 +35,7 @@
 
 ---
 
-## 🛠️ Requirements
+## Requirements
 
 - [.NET 6+ SDK or newer](https://dotnet.microsoft.com/download)
 - [Mono.Posix.NETStandard](https://www.nuget.org/packages/Mono.Posix.NETStandard) (for full Unix support)
@@ -48,7 +48,7 @@ dotnet add package Mono.Posix.NETStandard
 
 ---
 
-## 📦 Build
+## Build
 
 ```sh
 dotnet build
@@ -56,7 +56,7 @@ dotnet build
 
 ---
 
-## 🚀 Usage
+## Usage
 
 ```
 storagesphere <command> [options]
@@ -104,7 +104,7 @@ storagesphere info mybackup.ssph
 
 ---
 
-## 📝 Archive Format
+## Archive Format
 
 - **Header:** Magic (`SSPH`), version, compression, encryption flag, password hint, salt, IV.
 - **Entries:** Each file/dir with type, path, metadata, and (for files) compressed/encrypted content.
@@ -113,7 +113,7 @@ storagesphere info mybackup.ssph
 
 ---
 
-## 🔒 Security
+## Security
 
 - If `-p` is used, all file data and metadata is encrypted with AES-256-CBC.
 - The HMAC provides strong tamper detection—archives with a wrong password or corrupted data will refuse to extract.
@@ -121,14 +121,14 @@ storagesphere info mybackup.ssph
 
 ---
 
-## 🐧 Platform Notes
+## Platform Notes
 
 - **Unix Permissions:** On Linux/macOS, permissions are handled using Mono.Posix. On Windows, only basic file attributes are restored.
 - **Cross-Platform:** Archives created on one OS can be extracted on another, but some metadata may not round-trip perfectly.
 
 ---
 
-## 📚 Further Improvements & Roadmap
+## Further Improvements & Roadmap
 
 This proof of concept demonstrates a flexible, extensible, and robust archive format for modern use.  
 Ideas for the future:
@@ -140,15 +140,14 @@ Ideas for the future:
 
 ---
 
-## 👤 Author
-
-Created by **TheDomCraft**  
+## Last words
+ 
 Want to contribute or fork? Go ahead!  
 Suggestions, bug reports, and feature ideas are welcome.
 
 ---
 
-## 📖 License
+## License
 
 MIT License (see [LICENSE](LICENSE) file).
 
