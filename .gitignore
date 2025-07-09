@@ -367,3 +367,6 @@ tests/
 
 # Compiled builds of our project
 build/
+
+# Just for me
+notes.txt

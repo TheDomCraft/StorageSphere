@@ -66,7 +66,6 @@ namespace StorageSphere
                 }
                 key = new byte[CryptoHelper.KeySize]; // unused
                 hmacKey = new byte[CryptoHelper.KeySize]; // will use fixed all-zero key
-                // set HMAC key to all zeroes for unencrypted
                 Array.Clear(hmacKey, 0, hmacKey.Length);
             }
 
@@ -75,7 +74,7 @@ namespace StorageSphere
             {
                 // Write header
                 headerWriter.Write((int)0x53535048); // Magic "SSPH"
-                headerWriter.Write((byte)2); // Version
+                headerWriter.Write((byte)3); // Version: UPDATED TO 3
                 headerWriter.Write((byte)compType);
                 headerWriter.Write(encrypt); // encrypted
                 headerWriter.Write(hint ?? "");
@@ -87,7 +86,6 @@ namespace StorageSphere
                 // Prepare for HMAC calculation
                 using (var hmacStream = new MemoryStream())
                 {
-                    // Write the data body to hmacStream
                     Stream dataStream = hmacStream;
                     CryptoStream cryptoStream = null;
                     if (encrypt)
@@ -103,7 +101,6 @@ namespace StorageSphere
 
                     using (var writer = new BinaryWriter(dataStream, Encoding.UTF8, leaveOpen: true))
                     {
-                        // Gather all files/dirs to add
                         var allEntries = new List<(string abs, string rel)>();
                         foreach (string item in items)
                         {
@@ -117,7 +114,6 @@ namespace StorageSphere
                                     relPath = Path.Combine(rootName, relPath);
                                     allEntries.Add((entry, relPath));
                                 }
-                                // Add the root dir itself (may be empty)
                                 allEntries.Add((absPath, rootName));
                             }
                             else if (File.Exists(absPath))
@@ -130,10 +126,10 @@ namespace StorageSphere
                                     Console.WriteLine($"[StorageSphere] Warning: '{item}' not found.");
                             }
                         }
-                        int total = allEntries.Count;
-                        using (var pb = _verbose && !_quiet ? new ProgressBar(total) : null)
+                        long total = allEntries.Count;
+                        using (var pb = _verbose && !_quiet ? new ProgressBar((int)Math.Min(total, int.MaxValue)) : null)
                         {
-                            int idx = 0;
+                            long idx = 0;
                             foreach (var (abs, rel) in allEntries)
                             {
                                 idx++;
@@ -149,40 +145,46 @@ namespace StorageSphere
 
                                 if (type == EntryType.File)
                                 {
-                                    // Read file, compress, write
                                     using (var fileStream = File.OpenRead(abs))
-                                    using (var ms = new MemoryStream())
                                     {
-                                        Stream compStream = ms;
+                                        writer.Write((long)fi.Length);
+
+                                        // Placeholder for compressed length (long)
+                                        long compLenPos = dataStream.Position;
+                                        writer.Write((long)0); // placeholder
+                                        long dataStartPos = dataStream.Position;
+
+                                        Stream outStream = dataStream;
+                                        Stream compStream = outStream;
                                         switch (compType)
                                         {
                                             case CompressionType.Deflate:
-                                                compStream = new DeflateStream(ms, CompressionLevel.Optimal, leaveOpen: true);
+                                                compStream = new DeflateStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
                                                 break;
                                             case CompressionType.GZip:
-                                                compStream = new GZipStream(ms, CompressionLevel.Optimal, leaveOpen: true);
+                                                compStream = new GZipStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
                                                 break;
                                             case CompressionType.Brotli:
-                                                compStream = new BrotliStream(ms, CompressionLevel.Optimal, leaveOpen: true);
+                                                compStream = new BrotliStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
                                                 break;
                                             case CompressionType.None:
                                                 break;
                                         }
                                         fileStream.CopyTo(compStream);
                                         compStream.Flush();
-                                        if (compStream != ms) compStream.Dispose();
+                                        if (compStream != outStream) compStream.Dispose();
 
-                                        byte[] compData = ms.ToArray();
-                                        writer.Write((long)fi.Length);
-                                        writer.Write((int)compData.Length);
-                                        writer.Write(compData);
+                                        long dataEndPos = dataStream.Position;
+                                        long compLen = dataEndPos - dataStartPos;
+
+                                        // Seek back and write the length
+                                        long currPos = dataStream.Position;
+                                        dataStream.Position = compLenPos;
+                                        writer.Write(compLen);
+                                        dataStream.Position = currPos;
                                     }
                                 }
-                                else if (type == EntryType.Directory)
-                                {
-                                    // No data
-                                }
-                                pb?.Report(idx);
+                                pb?.Report((int)Math.Min(idx, int.MaxValue));
                             }
                         }
                     }
@@ -211,6 +213,8 @@ namespace StorageSphere
                 int magic = reader.ReadInt32();
                 if (magic != 0x53535048) throw new InvalidDataException("Not a StorageSphere archive.");
                 byte version = reader.ReadByte();
+                if (version < 3)
+                    throw new InvalidDataException($"Unsupported archive version: {version}. Version 3+ required for large file support.");
                 CompressionType compType = (CompressionType)reader.ReadByte();
                 bool encrypted = reader.ReadBoolean();
                 string hint = reader.ReadString();
@@ -229,9 +233,8 @@ namespace StorageSphere
                 }
                 else
                 {
-                    key = new byte[CryptoHelper.KeySize]; // unused
+                    key = new byte[CryptoHelper.KeySize];
                     hmacKey = new byte[CryptoHelper.KeySize];
-                    // always use all-zero HMAC key for unencrypted, this is temporary since idk how to fix it rn...
                     Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
@@ -239,12 +242,10 @@ namespace StorageSphere
                 long hmacPos = fs.Length - CryptoHelper.HmacSize;
                 long dataLen = hmacPos - bodyStart;
 
-                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
                 byte[] dataSection = new byte[dataLen];
                 fs.Read(dataSection, 0, (int)dataLen);
 
-                // Verify HMAC on the raw dataSection
                 byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
                 fs.Position = hmacPos;
                 byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
@@ -254,7 +255,6 @@ namespace StorageSphere
                     return;
                 }
 
-                // Decrypt if needed
                 Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
@@ -266,11 +266,9 @@ namespace StorageSphere
                     dataStream = new CryptoStream(dataStream, aes.CreateDecryptor(), CryptoStreamMode.Read);
                 }
 
-                // --- PROCESS ENTRIES ---
-                int totalCount = 0;
+                long totalCount = 0;
                 if (_verbose && !_quiet)
                 {
-                    // Count entries for progress bar (only if unencrypted, as we can scan MemoryStream)
                     if (dataStream is MemoryStream ms)
                     {
                         long oldPos = ms.Position;
@@ -280,12 +278,12 @@ namespace StorageSphere
                             try
                             {
                                 EntryType type = (EntryType)tempReader.ReadByte();
-                                tempReader.ReadString(); // rel
+                                tempReader.ReadString();
                                 FileMetadata.Read(tempReader);
                                 if (type == EntryType.File)
                                 {
                                     tempReader.ReadInt64();
-                                    int compLen = tempReader.ReadInt32();
+                                    long compLen = tempReader.ReadInt64();
                                     tempReader.BaseStream.Position += compLen;
                                 }
                                 totalCount++;
@@ -300,9 +298,9 @@ namespace StorageSphere
                 }
 
                 using (var dataReader = new BinaryReader(dataStream, Encoding.UTF8, leaveOpen: false))
-                using (var pb = _verbose && !_quiet ? new ProgressBar(totalCount > 0 ? totalCount : 1) : null)
+                using (var pb = _verbose && !_quiet ? new ProgressBar((int)Math.Min(totalCount, int.MaxValue)) : null)
                 {
-                    int idx = 0;
+                    long idx = 0;
                     while (true)
                     {
                         EntryType type;
@@ -311,7 +309,6 @@ namespace StorageSphere
                         catch (IOException) { break; }
                         string rel = dataReader.ReadString();
 
-                        // Sanitize path: do not allow absolute paths or parent traversal
                         if (Path.IsPathRooted(rel) || rel.Contains(".."))
                             throw new InvalidDataException("Invalid path in archive: " + rel);
 
@@ -326,12 +323,12 @@ namespace StorageSphere
                         else if (type == EntryType.File)
                         {
                             long origLen = dataReader.ReadInt64();
-                            int compLen = dataReader.ReadInt32();
-                            byte[] compData = dataReader.ReadBytes(compLen);
+                            long compLen = dataReader.ReadInt64();
+
                             Directory.CreateDirectory(Path.GetDirectoryName(outPath));
-                            using (var compStream = new MemoryStream(compData))
                             using (var fsOut = File.Create(outPath))
                             {
+                                Stream compStream = new SubStream(dataReader.BaseStream, compLen);
                                 Stream decStream = compStream;
                                 switch (compType)
                                 {
@@ -348,11 +345,14 @@ namespace StorageSphere
                                         break;
                                 }
                                 decStream.CopyTo(fsOut);
+                                if (decStream != compStream)
+                                    decStream.Dispose();
+                                compStream.Dispose();
                             }
                             SetMetadata(outPath, meta);
                         }
                         idx++;
-                        pb?.Report(idx);
+                        pb?.Report((int)Math.Min(idx, int.MaxValue));
                     }
                 }
             }
@@ -372,6 +372,8 @@ namespace StorageSphere
                 int magic = reader.ReadInt32();
                 if (magic != 0x53535048) throw new InvalidDataException("Not a StorageSphere archive.");
                 byte version = reader.ReadByte();
+                if (version < 3)
+                    throw new InvalidDataException($"Unsupported archive version: {version}. Version 3+ required for large file support.");
                 CompressionType compType = (CompressionType)reader.ReadByte();
                 bool encrypted = reader.ReadBoolean();
                 string hint = reader.ReadString();
@@ -399,12 +401,10 @@ namespace StorageSphere
                     Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
-                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
                 byte[] dataSection = new byte[dataLen];
                 fs.Read(dataSection, 0, (int)dataLen);
 
-                // Verify HMAC on the raw dataSection
                 byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
                 fs.Position = hmacPos;
                 byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
@@ -414,7 +414,6 @@ namespace StorageSphere
                     return;
                 }
 
-                // Decrypt if needed
                 Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
@@ -442,13 +441,12 @@ namespace StorageSphere
                         if (type == EntryType.File)
                         {
                             long origLen = dataReader.ReadInt64();
-                            int compLen = dataReader.ReadInt32();
+                            long compLen = dataReader.ReadInt64();
                             if (rel == entry)
                             {
-                                byte[] compData = dataReader.ReadBytes(compLen);
-                                using (var compStream = new MemoryStream(compData))
                                 using (var fsOut = File.Create(outFile))
                                 {
+                                    Stream compStream = new SubStream(dataReader.BaseStream, compLen);
                                     Stream decStream = compStream;
                                     switch (compType)
                                     {
@@ -465,6 +463,9 @@ namespace StorageSphere
                                             break;
                                     }
                                     decStream.CopyTo(fsOut);
+                                    if (decStream != compStream)
+                                        decStream.Dispose();
+                                    compStream.Dispose();
                                 }
                                 SetMetadata(outFile, meta);
                                 if (!_quiet)
@@ -474,15 +475,7 @@ namespace StorageSphere
                             else
                             {
                                 // skip
-                                byte[] discard = new byte[8192];
-                                int remain = compLen;
-                                while (remain > 0)
-                                {
-                                    int toRead = Math.Min(discard.Length, remain);
-                                    int n = dataReader.BaseStream.Read(discard, 0, toRead);
-                                    if (n <= 0) break;
-                                    remain -= n;
-                                }
+                                dataReader.BaseStream.Seek(compLen, SeekOrigin.Current);
                             }
                         }
                         else if (type == EntryType.Directory)
@@ -544,6 +537,8 @@ namespace StorageSphere
                 int magic = reader.ReadInt32();
                 if (magic != 0x53535048) throw new InvalidDataException("Not a StorageSphere archive.");
                 byte version = reader.ReadByte();
+                if (version < 3)
+                    throw new InvalidDataException($"Unsupported archive version: {version}. Version 3+ required for large file support.");
                 CompressionType compType = (CompressionType)reader.ReadByte();
                 bool encrypted = reader.ReadBoolean();
                 string hint = reader.ReadString();
@@ -571,12 +566,10 @@ namespace StorageSphere
                     Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
-                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
                 byte[] dataSection = new byte[dataLen];
                 fs.Read(dataSection, 0, (int)dataLen);
 
-                // Verify HMAC on the raw dataSection
                 byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
                 fs.Position = hmacPos;
                 byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
@@ -586,7 +579,6 @@ namespace StorageSphere
                     return;
                 }
 
-                // Decrypt if needed
                 Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
@@ -614,20 +606,12 @@ namespace StorageSphere
                         string typeStr = type == EntryType.Directory ? "[DIR ]" : "[FILE]";
                         string perms = meta.UnixPerms ?? "";
                         long origLen = 0;
-                        int compLen = 0;
+                        long compLen = 0;
                         if (type == EntryType.File)
                         {
                             origLen = dataReader.ReadInt64();
-                            compLen = dataReader.ReadInt32();
-                            byte[] discardBuf = new byte[8192];
-                            int bytesToRead = compLen;
-                            while (bytesToRead > 0)
-                            {
-                                int chunk = Math.Min(discardBuf.Length, bytesToRead);
-                                int read = dataReader.BaseStream.Read(discardBuf, 0, chunk);
-                                if (read == 0) break;
-                                bytesToRead -= read;
-                            }
+                            compLen = dataReader.ReadInt64();
+                            dataReader.BaseStream.Seek(compLen, SeekOrigin.Current);
                         }
                         Console.WriteLine($"{typeStr} {rel} | perms: {perms}");
                     }
@@ -644,6 +628,8 @@ namespace StorageSphere
                 int magic = reader.ReadInt32();
                 if (magic != 0x53535048) throw new InvalidDataException("Not a StorageSphere archive.");
                 byte version = reader.ReadByte();
+                if (version < 3)
+                    throw new InvalidDataException($"Unsupported archive version: {version}. Version 3+ required for large file support.");
                 CompressionType compType = (CompressionType)reader.ReadByte();
                 bool encrypted = reader.ReadBoolean();
                 string hint = reader.ReadString();
@@ -654,7 +640,7 @@ namespace StorageSphere
                 long hmacPos = fs.Length - CryptoHelper.HmacSize;
                 long dataLen = hmacPos - bodyStart;
 
-                int fileCount = 0, dirCount = 0;
+                long fileCount = 0, dirCount = 0;
                 long origTotal = 0, compTotal = 0;
                 byte[] key = null;
                 byte[] hmacKey = null;
@@ -671,12 +657,10 @@ namespace StorageSphere
                     Array.Clear(hmacKey, 0, hmacKey.Length);
                 }
 
-                // Read data section as written (encrypted if encrypted)
                 fs.Position = bodyStart;
                 byte[] dataSection = new byte[dataLen];
                 fs.Read(dataSection, 0, (int)dataLen);
 
-                // Verify HMAC on the raw dataSection
                 byte[] computedHmac = CryptoHelper.ComputeHmac(hmacKey, new MemoryStream(dataSection));
                 fs.Position = hmacPos;
                 byte[] fileHmac = reader.ReadBytes(CryptoHelper.HmacSize);
@@ -686,7 +670,6 @@ namespace StorageSphere
                     return;
                 }
 
-                // Decrypt if needed
                 Stream dataStream = new MemoryStream(dataSection, 0, dataSection.Length);
                 if (encrypted)
                 {
@@ -715,20 +698,10 @@ namespace StorageSphere
                         {
                             fileCount++;
                             long origLen = dataReader.ReadInt64();
-                            int compLen = dataReader.ReadInt32();
+                            long compLen = dataReader.ReadInt64();
                             origTotal += origLen;
                             compTotal += compLen;
-
-                            // Use non-seekable skip
-                            byte[] discardBuf = new byte[8192];
-                            int bytesToSkip = compLen;
-                            while (bytesToSkip > 0)
-                            {
-                                int chunkSize = Math.Min(discardBuf.Length, bytesToSkip);
-                                int n = dataReader.BaseStream.Read(discardBuf, 0, chunkSize);
-                                if (n <= 0) break;
-                                bytesToSkip -= n;
-                            }
+                            dataReader.BaseStream.Seek(compLen, SeekOrigin.Current);
                         }
                         else if (type == EntryType.Directory)
                         {
@@ -797,14 +770,13 @@ namespace StorageSphere
             };
         }
 
-        // This version ensures relpaths are always safe, never empty, never "."
         private string GetSafeRelativePath(string root, string full)
         {
             var rootUri = new Uri(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar);
             var fullUri = new Uri(Path.GetFullPath(full));
             var rel = Uri.UnescapeDataString(rootUri.MakeRelativeUri(fullUri).ToString().Replace('/', Path.DirectorySeparatorChar));
             if (string.IsNullOrEmpty(rel) || rel == "." || rel == string.Empty)
-                rel = Path.GetFileName(root); // fallback, never "."
+                rel = Path.GetFileName(root);
             return rel;
         }
 
@@ -852,6 +824,44 @@ namespace StorageSphere
             {
                 CopyDirectory(dir, Path.Combine(dest, Path.GetFileName(dir)));
             }
+        }
+
+        // Helper for streaming only a segment of a stream (used for decompress)
+        private class SubStream : Stream
+        {
+            private readonly Stream _base;
+            private long _remain;
+            public SubStream(Stream baseStream, long length)
+            {
+                _base = baseStream;
+                _remain = length;
+            }
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => _remain;
+            public override long Position { get => 0; set => throw new NotSupportedException(); }
+            public override void Flush() { }
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                if (_remain <= 0) return 0;
+                if (count > _remain) count = (int)_remain;
+                int n = _base.Read(buffer, offset, count);
+                _remain -= n;
+                return n;
+            }
+            public override int Read(Span<byte> buffer)
+            {
+                if (_remain <= 0) return 0;
+                int count = buffer.Length;
+                if (count > _remain) count = (int)_remain;
+                int n = _base.Read(buffer.Slice(0, count));
+                _remain -= n;
+                return n;
+            }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         }
     }
 }
