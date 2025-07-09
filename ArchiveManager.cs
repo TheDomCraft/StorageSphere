@@ -19,7 +19,44 @@ namespace StorageSphere
             _quiet = quiet;
         }
 
-        // PACK: create new archive, with optional encryption, compression, hint
+        // --- Helper: Stream that updates HMAC as data is written ---
+        private class HmacStream : Stream
+        {
+            private readonly Stream _base;
+            private readonly HMAC _hmac;
+            public HmacStream(Stream baseStream, HMAC hmac)
+            {
+                _base = baseStream;
+                _hmac = hmac;
+            }
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => _base.Length;
+            public override long Position { get => _base.Position; set => throw new NotSupportedException(); }
+            public override void Flush() => _base.Flush();
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => _base.SetLength(value);
+            public override void Write(byte[] buffer, int offset, int count)
+            {
+                _hmac?.TransformBlock(buffer, offset, count, null, 0);
+                _base.Write(buffer, offset, count);
+            }
+            public override void Write(ReadOnlySpan<byte> buffer)
+            {
+                if (_hmac != null)
+                    _hmac.TransformBlock(buffer.ToArray(), 0, buffer.Length, null, 0);
+                _base.Write(buffer);
+            }
+            protected override void Dispose(bool disposing)
+            {
+                _hmac?.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                base.Dispose(disposing);
+            }
+        }
+
+        // --- Main fix: no RAM buffering, direct streaming ---
         public void Pack(string archive, string[] items, bool setPassword, string hint, string compression)
         {
             if (!_quiet)
@@ -35,6 +72,11 @@ namespace StorageSphere
             bool encrypt = setPassword;
             string password = null;
 
+            using (var rng = RandomNumberGenerator.Create())
+            {
+                rng.GetBytes(salt);
+                rng.GetBytes(iv);
+            }
             if (encrypt)
             {
                 password = CryptoHelper.PromptPassword("Enter password to protect the archive: ");
@@ -49,159 +91,146 @@ namespace StorageSphere
                     Console.WriteLine("[StorageSphere] Error: Passwords do not match.");
                     return;
                 }
-                using (var rng = RandomNumberGenerator.Create())
-                {
-                    rng.GetBytes(salt);
-                    rng.GetBytes(iv);
-                }
                 key = CryptoHelper.DeriveKey(password, salt);
                 hmacKey = CryptoHelper.DeriveKey(password + "HMAC", salt);
             }
             else
             {
-                using (var rng = RandomNumberGenerator.Create())
-                {
-                    rng.GetBytes(salt);
-                    rng.GetBytes(iv);
-                }
                 key = new byte[CryptoHelper.KeySize]; // unused
-                hmacKey = new byte[CryptoHelper.KeySize]; // will use fixed all-zero key
+                hmacKey = new byte[CryptoHelper.KeySize];
                 Array.Clear(hmacKey, 0, hmacKey.Length);
             }
 
             using (var fs = File.Create(archive))
             using (var headerWriter = new BinaryWriter(fs, Encoding.UTF8, leaveOpen: true))
+            using (var hmac = new HMACSHA256(hmacKey))
             {
                 // Write header
                 headerWriter.Write((int)0x53535048); // Magic "SSPH"
-                headerWriter.Write((byte)3); // Version: UPDATED TO 3
+                headerWriter.Write((byte)3); // Version: 3
                 headerWriter.Write((byte)compType);
                 headerWriter.Write(encrypt); // encrypted
                 headerWriter.Write(hint ?? "");
                 headerWriter.Write(salt);
                 headerWriter.Write(iv);
 
-                long headerEnd = fs.Position;
+                Stream archiveStream = fs;
+                archiveStream = new HmacStream(archiveStream, hmac);
 
-                // Prepare for HMAC calculation
-                using (var hmacStream = new MemoryStream())
+                CryptoStream cryptoStream = null;
+                if (encrypt)
                 {
-                    Stream dataStream = hmacStream;
-                    CryptoStream cryptoStream = null;
-                    if (encrypt)
-                    {
-                        var aes = Aes.Create();
-                        aes.Key = key;
-                        aes.IV = iv;
-                        aes.Mode = CipherMode.CBC;
-                        aes.Padding = PaddingMode.PKCS7;
-                        cryptoStream = new CryptoStream(hmacStream, aes.CreateEncryptor(), CryptoStreamMode.Write, leaveOpen: true);
-                        dataStream = cryptoStream;
-                    }
-
-                    using (var writer = new BinaryWriter(dataStream, Encoding.UTF8, leaveOpen: true))
-                    {
-                        var allEntries = new List<(string abs, string rel)>();
-                        foreach (string item in items)
-                        {
-                            string absPath = Path.GetFullPath(item);
-                            if (Directory.Exists(absPath))
-                            {
-                                string rootName = Path.GetFileName(Path.GetFullPath(absPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                                foreach (var entry in Directory.EnumerateFileSystemEntries(absPath, "*", SearchOption.AllDirectories))
-                                {
-                                    string relPath = GetSafeRelativePath(absPath, entry);
-                                    relPath = Path.Combine(rootName, relPath);
-                                    allEntries.Add((entry, relPath));
-                                }
-                                allEntries.Add((absPath, rootName));
-                            }
-                            else if (File.Exists(absPath))
-                            {
-                                allEntries.Add((absPath, Path.GetFileName(absPath)));
-                            }
-                            else
-                            {
-                                if (!_quiet)
-                                    Console.WriteLine($"[StorageSphere] Warning: '{item}' not found.");
-                            }
-                        }
-                        long total = allEntries.Count;
-                        using (var pb = _verbose && !_quiet ? new ProgressBar((int)Math.Min(total, int.MaxValue)) : null)
-                        {
-                            long idx = 0;
-                            foreach (var (abs, rel) in allEntries)
-                            {
-                                idx++;
-                                var fi = new FileInfo(abs);
-                                bool isDir = Directory.Exists(abs);
-                                EntryType type = isDir ? EntryType.Directory : EntryType.File;
-
-                                writer.Write((byte)type);
-                                writer.Write(rel);
-
-                                var meta = GatherMetadata(abs, type);
-                                meta.Write(writer);
-
-                                if (type == EntryType.File)
-                                {
-                                    using (var fileStream = File.OpenRead(abs))
-                                    {
-                                        writer.Write((long)fi.Length);
-
-                                        // Placeholder for compressed length (long)
-                                        long compLenPos = dataStream.Position;
-                                        writer.Write((long)0); // placeholder
-                                        long dataStartPos = dataStream.Position;
-
-                                        Stream outStream = dataStream;
-                                        Stream compStream = outStream;
-                                        switch (compType)
-                                        {
-                                            case CompressionType.Deflate:
-                                                compStream = new DeflateStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
-                                                break;
-                                            case CompressionType.GZip:
-                                                compStream = new GZipStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
-                                                break;
-                                            case CompressionType.Brotli:
-                                                compStream = new BrotliStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
-                                                break;
-                                            case CompressionType.None:
-                                                break;
-                                        }
-                                        fileStream.CopyTo(compStream);
-                                        compStream.Flush();
-                                        if (compStream != outStream) compStream.Dispose();
-
-                                        long dataEndPos = dataStream.Position;
-                                        long compLen = dataEndPos - dataStartPos;
-
-                                        // Seek back and write the length
-                                        long currPos = dataStream.Position;
-                                        dataStream.Position = compLenPos;
-                                        writer.Write(compLen);
-                                        dataStream.Position = currPos;
-                                    }
-                                }
-                                pb?.Report((int)Math.Min(idx, int.MaxValue));
-                            }
-                        }
-                    }
-                    if (encrypt)
-                        cryptoStream?.FlushFinalBlock();
-
-                    // Write HMAC
-                    byte[] hmac = CryptoHelper.ComputeHmac(hmacKey, hmacStream);
-                    fs.Write(hmacStream.GetBuffer(), 0, (int)hmacStream.Length);
-                    fs.Write(hmac, 0, hmac.Length);
+                    var aes = Aes.Create();
+                    aes.Key = key;
+                    aes.IV = iv;
+                    aes.Mode = CipherMode.CBC;
+                    aes.Padding = PaddingMode.PKCS7;
+                    cryptoStream = new CryptoStream(archiveStream, aes.CreateEncryptor(), CryptoStreamMode.Write, leaveOpen: true);
+                    archiveStream = cryptoStream;
                 }
+
+                using (var writer = new BinaryWriter(archiveStream, Encoding.UTF8, leaveOpen: true))
+                {
+                    var allEntries = new List<(string abs, string rel)>();
+                    foreach (string item in items)
+                    {
+                        string absPath = Path.GetFullPath(item);
+                        if (Directory.Exists(absPath))
+                        {
+                            string rootName = Path.GetFileName(Path.GetFullPath(absPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                            foreach (var entry in Directory.EnumerateFileSystemEntries(absPath, "*", SearchOption.AllDirectories))
+                            {
+                                string relPath = GetSafeRelativePath(absPath, entry);
+                                relPath = Path.Combine(rootName, relPath);
+                                allEntries.Add((entry, relPath));
+                            }
+                            allEntries.Add((absPath, rootName));
+                        }
+                        else if (File.Exists(absPath))
+                        {
+                            allEntries.Add((absPath, Path.GetFileName(absPath)));
+                        }
+                        else
+                        {
+                            if (!_quiet)
+                                Console.WriteLine($"[StorageSphere] Warning: '{item}' not found.");
+                        }
+                    }
+                    long total = allEntries.Count;
+                    using (var pb = _verbose && !_quiet ? new ProgressBar((int)Math.Min(total, int.MaxValue)) : null)
+                    {
+                        long idx = 0;
+                        foreach (var (abs, rel) in allEntries)
+                        {
+                            idx++;
+                            var fi = new FileInfo(abs);
+                            bool isDir = Directory.Exists(abs);
+                            EntryType type = isDir ? EntryType.Directory : EntryType.File;
+
+                            writer.Write((byte)type);
+                            writer.Write(rel);
+
+                            var meta = GatherMetadata(abs, type);
+                            meta.Write(writer);
+
+                            if (type == EntryType.File)
+                            {
+                                using (var fileStream = File.OpenRead(abs))
+                                {
+                                    writer.Write((long)fi.Length);
+
+                                    // Placeholder for compressed length (long)
+                                    long compLenPos = archiveStream.Position;
+                                    writer.Write((long)0); // placeholder
+                                    long compStart = archiveStream.Position;
+
+                                    Stream outStream = archiveStream;
+                                    Stream compStream = outStream;
+                                    switch (compType)
+                                    {
+                                        case CompressionType.Deflate:
+                                            compStream = new DeflateStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
+                                            break;
+                                        case CompressionType.GZip:
+                                            compStream = new GZipStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
+                                            break;
+                                        case CompressionType.Brotli:
+                                            compStream = new BrotliStream(outStream, CompressionLevel.Optimal, leaveOpen: true);
+                                            break;
+                                        case CompressionType.None:
+                                            break;
+                                    }
+                                    fileStream.CopyTo(compStream);
+                                    compStream.Flush();
+                                    if (compStream != outStream) compStream.Dispose();
+
+                                    long compEnd = archiveStream.Position;
+                                    long compLen = compEnd - compStart;
+
+                                    // Seek back and write length
+                                    long currPos = archiveStream.Position;
+                                    archiveStream.Position = compLenPos;
+                                    writer.Write(compLen);
+                                    archiveStream.Position = currPos;
+                                }
+                            }
+                            pb?.Report((int)Math.Min(idx, int.MaxValue));
+                        }
+                    }
+                }
+                if (encrypt && cryptoStream != null)
+                    cryptoStream.FlushFinalBlock();
+
+                hmac.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+                byte[] hmacBytes = hmac.Hash;
+
+                fs.Write(hmacBytes, 0, hmacBytes.Length);
+
+                if (!_quiet)
+                    Console.WriteLine($"[StorageSphere] Archive saved: {archive}");
             }
-            if (!_quiet)
-                Console.WriteLine($"[StorageSphere] Archive saved: {archive}");
         }
 
-        // UNPACK: extract all files
         public void Unpack(string archive, string outdir)
         {
             if (!_quiet)
@@ -360,7 +389,6 @@ namespace StorageSphere
                 Console.WriteLine($"[StorageSphere] Unpacked archive to '{outdir}'.");
         }
 
-        // EXTRACT SINGLE FILE
         public void ExtractSingle(string archive, string entry, string outFile)
         {
             if (!_quiet)
@@ -474,7 +502,6 @@ namespace StorageSphere
                             }
                             else
                             {
-                                // skip
                                 dataReader.BaseStream.Seek(compLen, SeekOrigin.Current);
                             }
                         }
@@ -488,7 +515,6 @@ namespace StorageSphere
             Console.WriteLine($"[StorageSphere] Entry '{entry}' not found in archive.");
         }
 
-        // ADD SINGLE FILE
         public void AddFiles(string archive, string[] files)
         {
             string tempDir = Path.Combine(Path.GetTempPath(), "storagesphere_add_" + Guid.NewGuid().ToString("N"));
@@ -528,7 +554,6 @@ namespace StorageSphere
             }
         }
 
-        // LIST CONTENTS: FIXED to only decrypt the correct section
         public void ListContents(string archive)
         {
             using (var fs = File.OpenRead(archive))
@@ -619,7 +644,6 @@ namespace StorageSphere
             }
         }
 
-        // SHOW INFO
         public void ShowInfo(string archive)
         {
             using (var fs = File.OpenRead(archive))
@@ -724,7 +748,6 @@ namespace StorageSphere
             }
         }
 
-        // CHANGE PASSWORD
         public void ChangePassword(string archive)
         {
             string tempDir = Path.Combine(Path.GetTempPath(), "storagesphere_passwd_" + Guid.NewGuid().ToString("N"));
@@ -756,8 +779,6 @@ namespace StorageSphere
                 Directory.Delete(tempDir, true);
             }
         }
-
-        // HELPERS
 
         private CompressionType ParseCompression(string c)
         {
@@ -826,7 +847,6 @@ namespace StorageSphere
             }
         }
 
-        // Helper for streaming only a segment of a stream (used for decompress)
         private class SubStream : Stream
         {
             private readonly Stream _base;
