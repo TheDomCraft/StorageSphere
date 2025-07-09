@@ -110,13 +110,15 @@ namespace StorageSphere
                             string absPath = Path.GetFullPath(item);
                             if (Directory.Exists(absPath))
                             {
+                                string rootName = Path.GetFileName(Path.GetFullPath(absPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                                 foreach (var entry in Directory.EnumerateFileSystemEntries(absPath, "*", SearchOption.AllDirectories))
                                 {
-                                    string relPath = GetRelativePath(absPath, entry);
+                                    string relPath = GetSafeRelativePath(absPath, entry);
+                                    relPath = Path.Combine(rootName, relPath);
                                     allEntries.Add((entry, relPath));
                                 }
                                 // Add the root dir itself (may be empty)
-                                allEntries.Add((absPath, "."));
+                                allEntries.Add((absPath, rootName));
                             }
                             else if (File.Exists(absPath))
                             {
@@ -308,8 +310,14 @@ namespace StorageSphere
                         catch (EndOfStreamException) { break; }
                         catch (IOException) { break; }
                         string rel = dataReader.ReadString();
+
+                        // Sanitize path: do not allow absolute paths or parent traversal
+                        if (Path.IsPathRooted(rel) || rel.Contains(".."))
+                            throw new InvalidDataException("Invalid path in archive: " + rel);
+
                         var meta = FileMetadata.Read(dataReader);
                         string outPath = Path.Combine(outdir, rel);
+
                         if (type == EntryType.Directory)
                         {
                             Directory.CreateDirectory(outPath);
@@ -427,6 +435,9 @@ namespace StorageSphere
                         catch (EndOfStreamException) { break; }
                         catch (IOException) { break; }
                         string rel = dataReader.ReadString();
+                        if (Path.IsPathRooted(rel) || rel.Contains(".."))
+                            throw new InvalidDataException("Invalid path in archive: " + rel);
+
                         var meta = FileMetadata.Read(dataReader);
                         if (type == EntryType.File)
                         {
@@ -596,6 +607,9 @@ namespace StorageSphere
                         catch (EndOfStreamException) { break; }
                         catch (IOException) { break; }
                         string rel = dataReader.ReadString();
+                        if (Path.IsPathRooted(rel) || rel.Contains(".."))
+                            throw new InvalidDataException("Invalid path in archive: " + rel);
+
                         var meta = FileMetadata.Read(dataReader);
                         string typeStr = type == EntryType.Directory ? "[DIR ]" : "[FILE]";
                         string perms = meta.UnixPerms ?? "";
@@ -693,6 +707,9 @@ namespace StorageSphere
                         catch (EndOfStreamException) { break; }
                         catch (IOException) { break; }
                         string rel = dataReader.ReadString();
+                        if (Path.IsPathRooted(rel) || rel.Contains(".."))
+                            throw new InvalidDataException("Invalid path in archive: " + rel);
+
                         var meta = FileMetadata.Read(dataReader);
                         if (type == EntryType.File)
                         {
@@ -768,6 +785,7 @@ namespace StorageSphere
         }
 
         // HELPERS
+
         private CompressionType ParseCompression(string c)
         {
             return c?.ToLowerInvariant() switch
@@ -779,11 +797,15 @@ namespace StorageSphere
             };
         }
 
-        private string GetRelativePath(string root, string full)
+        // This version ensures relpaths are always safe, never empty, never "."
+        private string GetSafeRelativePath(string root, string full)
         {
-            var rootUri = new Uri(Path.GetFullPath(root) + Path.DirectorySeparatorChar);
+            var rootUri = new Uri(Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar);
             var fullUri = new Uri(Path.GetFullPath(full));
-            return Uri.UnescapeDataString(rootUri.MakeRelativeUri(fullUri).ToString().Replace('/', Path.DirectorySeparatorChar));
+            var rel = Uri.UnescapeDataString(rootUri.MakeRelativeUri(fullUri).ToString().Replace('/', Path.DirectorySeparatorChar));
+            if (string.IsNullOrEmpty(rel) || rel == "." || rel == string.Empty)
+                rel = Path.GetFileName(root); // fallback, never "."
+            return rel;
         }
 
         private FileMetadata GatherMetadata(string path, EntryType type)
