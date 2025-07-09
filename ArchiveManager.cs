@@ -730,7 +730,7 @@ namespace StorageSphere
                 Console.WriteLine($"Files: {fileCount}, Dirs: {dirCount}");
                 Console.WriteLine($"Total size: {Utils.HumanSize(origTotal)} ({origTotal} bytes)");
                 Console.WriteLine($"Compressed: {Utils.HumanSize(compTotal)} ({compTotal} bytes)");
-                Console.WriteLine("===================================");
+                Console.WriteLine("======================================");
             }
         }
 
